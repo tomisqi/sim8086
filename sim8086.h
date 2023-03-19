@@ -1,3 +1,3 @@
 #include "common.h"
 
-void Dissasemble(Buffer buffer);
+void Sim8086(Buffer buffer);

@@ -7,6 +7,7 @@ enum OpCodeE
 {
   OP_NONE,
   MOV,
+  MOVIMM,
 };
 
 enum RegisterE
@@ -30,9 +31,14 @@ enum RegisterE
     DI,
 };
 
-struct Decoded
+struct DecodingOutput
 {
-  OpCodeE opCode;
+  String32 decoded;
+  int bytesConsumed;
+};
+
+struct MOVFields
+{
   int dBit;
   int wBit;
   int mod;
@@ -40,32 +46,47 @@ struct Decoded
   int rm;
 };
 
-static OpCodeE GetOpCode(U16 instr);
-static Decoded Decode(U16 instr);
+struct MOVIMMFields
+{
+  int wBit;
+  int reg;
+};
+
+struct EACalculation
+{
+  RegisterE operand1;
+  RegisterE operand2;
+  int displacement;
+};
+
+static OpCodeE GetOpCode(U8 byte);
+static MOVFields MOVDecode(U8* buf_p);
 static RegisterE GetRegister(int reg, int wBit);
 static String32 GetRegisterString(RegisterE reg);
-static String32 MOVInstruction(Decoded decoded);
+static DecodingOutput MOV_InstructionDecoding(const U8* buf_p);
+static DecodingOutput MOVIMM_InstructionDecoding(const U8* buf_p);
 
 //-----------------------------------------------------------------------------
 // Global Functions
 //-----------------------------------------------------------------------------
-void Dissasemble(Buffer buffer)
+void Sim8086(Buffer buffer)
 {
-  const U16* buf_p = (U16*)buffer.buf_p;
-  int bufSize16 = buffer.bufSize / 2;
+  const U8* buf_p = buffer.buf_p;
 
   printf("bits 16\n");
 
-  for(int i = 0; i < bufSize16; i++)
+  while(BYTE_OFFSET(buf_p, buffer.buf_p) < buffer.bufSize)
   {
-    String32 decodedStr;
-    U16 instr = ENDIAN_SHIFT16(*buf_p);
+    DecodingOutput decodingOutput;
 
-    Decoded decoded = Decode(instr);
-    switch (decoded.opCode)
+    OpCodeE opCode = GetOpCode(*buf_p);
+    switch (opCode)
     {
     case MOV:
-      decodedStr = MOVInstruction(decoded);
+      decodingOutput = MOV_InstructionDecoding(buf_p);
+      break;
+    case MOVIMM:
+      decodingOutput = MOVIMM_InstructionDecoding(buf_p);
       break;
     case OP_NONE:
     default:
@@ -73,43 +94,61 @@ void Dissasemble(Buffer buffer)
     break;
     }
 
-    printf("%s\n", decodedStr.buf);
+    printf("%s\n", decodingOutput.decoded.buf);
     
-    buf_p++;
+    buf_p += decodingOutput.bytesConsumed;
   }
 }
 
 //-----------------------------------------------------------------------------
 // Local Functions
 //-----------------------------------------------------------------------------
-
-static OpCodeE GetOpCode(U16 instr)
+static OpCodeE GetOpCode(U8 byte)
 {
-  int op = (instr >> 10) & 0x3f;
-  OpCodeE opCode = OP_NONE;
-  switch (op)
+  if (((byte >> 4) & 0xf) == 0xb)
   {
-  case 0x22:
-    opCode = MOV;
-    break;
-  default:
-    assert(false);
-    break;
+    return MOVIMM;
   }
-  return opCode;
+  if (((byte >> 2) & 0x3f) == 0x22)
+  {
+    return MOV;
+  }
+  assert(false);
+  return OP_NONE;
 }
 
-static Decoded Decode(U16 instr)
+static MOVFields MOV_GetFields(const U8* buf_p)
 {
-  Decoded decoded;
-  decoded.opCode = GetOpCode(instr);
-  decoded.dBit = (instr >> 9) & 0x1;
-  decoded.wBit = (instr >> 8) & 0x1;
-  decoded.mod = (instr >> 6) & 0x3;
-  decoded.reg = (instr >> 3) & 0x7;
-  decoded.rm = (instr) & 0x7;
+  U8 byte1 = buf_p[0];
+  U8 byte2 = buf_p[1];
+  
+  MOVFields decoded;
+  decoded.dBit = (byte1 >> 1) & 0x1;
+  decoded.wBit = (byte1     ) & 0x1;
+  decoded.mod =  (byte2 >> 6) & 0x3;
+  decoded.reg =  (byte2 >> 3) & 0x7;
+  decoded.rm =   (byte2     ) & 0x7;
   return decoded;
 }
+
+static MOVIMMFields MOVIMM_GetFields(const U8* buf_p)
+{
+  U8 byte1 = buf_p[0];
+  MOVIMMFields decoded;
+
+  decoded.wBit = (byte1 >> 3) & 0x1;
+  decoded.reg =  (byte1     ) & 0x7;
+
+  return decoded;
+}
+
+static void GetEACalculationRegisters(int rm, RegisterE* reg1_p, RegisterE* reg2_p)
+{
+  RegisterE RmEAEncoding[8][2] = {{BX, SI}, {BX, DI}, {BP, SI}, {BP, DI}, {SI, REG_NONE}, {DI, REG_NONE}, {BP, REG_NONE}, {BX, REG_NONE}};
+  *reg1_p = RmEAEncoding[rm][0];
+  *reg2_p = RmEAEncoding[rm][1];
+}
+
 
 static RegisterE GetRegister(int reg, int wBit)
 {
@@ -117,32 +156,101 @@ static RegisterE GetRegister(int reg, int wBit)
     return registers[reg][wBit];
 }
 
-static String32 MOVInstruction(Decoded decoded)
+static DecodingOutput MOV_InstructionDecoding(const U8* buf_p)
 {
-  if (decoded.mod != 0x3)
+  MOVFields movFields = MOV_GetFields(buf_p);
+  
+  String32 srcStr = {0};
+  String32 dstStr = {0};
+  int consumedBytes = 2; // At least 2 bytes are consumed by MOV.
+  if (movFields.mod == 0x3) // Register Mode.
   {
-    String32 notsupported = {0};
-    sprintf(notsupported.buf, "NO_SUPPORT");
-    notsupported.len = strlen(notsupported.buf);
-    return notsupported;
+    RegisterE srcReg = GetRegister(movFields.reg, movFields.wBit);
+    RegisterE dstReg = GetRegister(movFields.rm, movFields.wBit);
+    srcStr = GetRegisterString(srcReg);
+    dstStr = GetRegisterString(dstReg);
+  }
+  else // Memory Mode.
+  {
+    RegisterE srcReg = GetRegister(movFields.reg, movFields.wBit);
+    srcStr = GetRegisterString(srcReg);
+
+    RegisterE operand1; RegisterE operand2;
+    GetEACalculationRegisters(movFields.rm, &operand1, &operand2);
+    bool directAddress = (movFields.mod == 0x0 && movFields.rm == 0x6);
+
+    U32 displacement = 0;
+    if (movFields.mod == 0x1)
+    {
+      displacement = buf_p[2];
+      consumedBytes += 1;
+    }
+    else if (movFields.mod == 0x2 || directAddress)
+    {
+      displacement = buf_p[2] | buf_p[3] << 8;
+      consumedBytes += 2;
+    }
+
+    String32 operand1Str = GetRegisterString(operand1);
+    String32 operand2Str = GetRegisterString(operand2);
+    if (directAddress)
+    {
+      sprintf(operand1Str.buf, "%d", displacement);
+    }
+    
+    sprintf(dstStr.buf, "[%s", operand1Str.buf);
+    if (operand2 != REG_NONE)
+    {
+      char buf[32] = {0};
+      sprintf(buf, "+ %s", operand2Str.buf);
+      strcat(dstStr.buf, buf);
+    }
+    if (displacement)
+    {
+      char buf[32] = {0};
+      sprintf(buf, "+ %d", displacement);
+      strcat(dstStr.buf, buf);
+    }
+    strcat(dstStr.buf, "]");
+  }
+    
+  if (movFields.dBit == 1) // Swap Src<->Dst.
+  {
+    String32 tmp = srcStr;
+    srcStr = dstStr;
+    dstStr = tmp;
   }
   
-  RegisterE srcReg = GetRegister(decoded.reg, decoded.wBit);
-  RegisterE dstReg = GetRegister(decoded.rm, decoded.wBit);
-  if (decoded.dBit == 1)
+  DecodingOutput decodingOutput = {0};
+  decodingOutput.bytesConsumed = consumedBytes;
+  sprintf(decodingOutput.decoded.buf, "mov %s, %s", dstStr.buf, srcStr.buf);
+  decodingOutput.decoded.len = strlen(decodingOutput.decoded.buf);
+  return decodingOutput;
+}
+
+static DecodingOutput MOVIMM_InstructionDecoding(const U8* buf_p)
+{
+  MOVIMMFields movImmFields = MOVIMM_GetFields(buf_p);
+
+  String32 srcStr;
+  String32 dstStr;
+  int consumedBytes = 2; // At least 2 bytes are consumed by MOVIMM.
+  int data = buf_p[1];
+  if (movImmFields.wBit == 1)
   {
-    RegisterE tmp = srcReg;
-    srcReg = dstReg;
-    dstReg = tmp;
+    data = buf_p[1] | buf_p[2] << 8;
+    consumedBytes += 1;
   }
+  sprintf(srcStr.buf, "%d", data);
 
-  String32 srcRegStr = GetRegisterString(srcReg);
-  String32 dstRegStr = GetRegisterString(dstReg);
-
-  String32 result = {0};
-  sprintf(result.buf, "mov %s, %s", dstRegStr.buf, srcRegStr.buf);
-  result.len = strlen(result.buf);
-  return result;
+  RegisterE dstReg = GetRegister(movImmFields.reg, movImmFields.wBit);
+  dstStr = GetRegisterString(dstReg);
+  
+  DecodingOutput decodingOutput = {0};
+  decodingOutput.bytesConsumed = consumedBytes;
+  sprintf(decodingOutput.decoded.buf, "mov %s, %s", dstStr.buf, srcStr.buf);
+  decodingOutput.decoded.len = strlen(decodingOutput.decoded.buf);
+  return decodingOutput;
 }
 
 static String32 GetRegisterString(RegisterE reg)
@@ -199,6 +307,8 @@ static String32 GetRegisterString(RegisterE reg)
     sprintf(result.buf, "di");
     break;    
   case REG_NONE:
+    sprintf(result.buf, "");
+    break;
   default:
     assert(false);
     break;    

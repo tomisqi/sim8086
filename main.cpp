@@ -4,13 +4,21 @@
 #include "sim8086.h"
 
 static void DumpHex(Buffer buffer);
+static void Usage();
 
 //-----------------------------------------------------------------------------
-// Global Functions
 //-----------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
   char* filename = argv[1];
+
+  if (argc != 2) 
+  {
+    fprintf(stderr, "Invalid number of arguments.\n");
+    Usage();
+    return 1;
+  }
+
   FILE *file = fopen(filename, "rb");
 
   Buffer buffer = {0};
@@ -18,7 +26,9 @@ int main(int argc, char** argv)
   buffer.bufSize = fread(buffer.buf_p, 1, BUF_SIZE, file);
   assert(buffer.bufSize <= BUF_SIZE);
 
-  Dissasemble(buffer);
+  Sim8086(buffer);
+
+  return 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -36,4 +46,9 @@ static void DumpHex(Buffer buffer)
     if (i % 16 == 15) printf("\n");
   }
   printf("\n");
+}
+
+static void Usage()
+{
+  printf("Usage: sim8086.exe <binaryfile>\n");
 }
